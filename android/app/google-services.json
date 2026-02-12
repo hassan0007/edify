@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "275745510969",
+    "project_id": "edify-26929",
+    "storage_bucket": "edify-26929.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:275745510969:android:5cb1184432eb77d2e05fe8",
+        "android_client_info": {
+          "package_name": "com.example.edify"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAxpBuTVTwdrGN47tIeA-47WHlc2VnN5cc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
