@@ -23,17 +23,15 @@ class ScheduleService {
         .onValue
         .map((event) {
       final data = event.snapshot.value as Map<dynamic, dynamic>?;
-      
-      if (data == null) return <ClassSchedule>[];
-      
+      if (data == null) return [];
+
       final schedules = data.entries.map((entry) {
         final scheduleData = Map<String, dynamic>.from(entry.value as Map);
         return ClassSchedule.fromMap(scheduleData, entry.key as String);
       }).toList();
-      
+
       // Sort by time slot
       schedules.sort((a, b) => a.timeSlot.compareTo(b.timeSlot));
-      
       return schedules;
     });
   }
@@ -47,16 +45,14 @@ class ScheduleService {
         .onValue
         .map((event) {
       final data = event.snapshot.value as Map<dynamic, dynamic>?;
-      
-      if (data == null) return <ClassSchedule>[];
-      
+      if (data == null) return [];
+
       final schedules = data.entries.map((entry) {
         final scheduleData = Map<String, dynamic>.from(entry.value as Map);
         return ClassSchedule.fromMap(scheduleData, entry.key as String);
       }).toList();
-      
+
       schedules.sort((a, b) => a.timeSlot.compareTo(b.timeSlot));
-      
       return schedules;
     });
   }
@@ -75,17 +71,18 @@ class ScheduleService {
       }
 
       final data = event.snapshot.value as Map<dynamic, dynamic>;
-      
       for (var entry in data.entries) {
         final scheduleData = Map<String, dynamic>.from(entry.value as Map);
-        ClassSchedule existingSchedule = ClassSchedule.fromMap(scheduleData, entry.key as String);
-        
+        ClassSchedule existingSchedule =
+        ClassSchedule.fromMap(scheduleData, entry.key as String);
+
         // Check if there's any day overlap
         bool hasOverlap = existingSchedule.days.any((day) => days.contains(day));
         if (hasOverlap) {
           return false;
         }
       }
+
       return true;
     } catch (e) {
       throw Exception('Error checking availability: $e');
@@ -130,7 +127,9 @@ class ScheduleService {
   }
 
   String _formatTime(int hour, int minute) {
-    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+    String period = hour >= 12 ? 'PM' : 'AM';
+    int displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
+    return '${displayHour.toString()}:${minute.toString().padLeft(2, '0')} $period';
   }
 
   // Delete schedule

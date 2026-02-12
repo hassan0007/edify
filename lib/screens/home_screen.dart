@@ -45,12 +45,16 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
     }
+
     return slots;
   }
 
   String _formatTime(int hour, int minute) {
-    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+    String period = hour >= 12 ? 'PM' : 'AM';
+    int displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
+    return '${displayHour.toString()}:${minute.toString().padLeft(2, '0')} $period';
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -61,7 +65,7 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Icon(Icons.school, size: 28),
             SizedBox(width: 12),
-            Text('Institute Schedule Manager'),
+            Text('Edify College of IT'),
           ],
         ),
         actions: [
@@ -85,6 +89,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     labelText: 'Filter by Classroom',
                     prefixIcon: Icon(Icons.meeting_room, color: Colors.white),
                     labelStyle: TextStyle(color: Colors.white),
+                    floatingLabelStyle: TextStyle(color: Colors.white),
                     filled: true,
                     fillColor: Colors.white.withOpacity(0.2),
                     border: OutlineInputBorder(
@@ -238,7 +243,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildStylishScheduleTable(List<ClassSchedule> schedules) {
     return Container(
-      padding: EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
         boxShadow: [
@@ -315,6 +319,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: SingleChildScrollView(
+                scrollDirection: Axis.vertical,
                 child: Container(
                   padding: EdgeInsets.all(16),
                   child: Table(
@@ -322,7 +327,8 @@ class _HomeScreenState extends State<HomeScreen> {
                       horizontalInside: BorderSide(color: Colors.grey.shade200, width: 1),
                       verticalInside: BorderSide(color: Colors.grey.shade200, width: 1),
                     ),
-                    defaultColumnWidth: FixedColumnWidth(200),
+                    defaultColumnWidth: FixedColumnWidth(190),
+
                     children: [
                       // Header Row with Days
                       TableRow(
