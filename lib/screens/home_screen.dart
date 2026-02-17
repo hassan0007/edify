@@ -1,564 +1,467 @@
 import 'package:flutter/material.dart';
-import '../models/teacher.dart';
+import 'package:flutter/gestures.dart';
 import '../models/class_schedule.dart';
 import '../services/teacher_service.dart';
 import '../services/schedule_service.dart';
 import '../services/pdf_service.dart';
 import '../widgets/add_teacher_dialog.dart';
+import '../widgets/add_classroom_dialog.dart';
 import '../widgets/add_class_dialog.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({Key? key}) : super(key: key);
+  /// Optional shared stream from AppShell. When provided, HomeScreen reuses
+  /// it instead of creating its own Firebase subscription.
+  final Stream<List<ClassSchedule>>? schedulesStream;
+
+  const HomeScreen({Key? key, this.schedulesStream}) : super(key: key);
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final TeacherService _teacherService = TeacherService();
-  final ScheduleService _scheduleService = ScheduleService();
-  final PdfService _pdfService = PdfService();
+  final TeacherService   _teacherService   = TeacherService();
+  final ScheduleService  _scheduleService  = ScheduleService();
+  final PdfService       _pdfService       = PdfService();
+
+  // ── Cached stream — ONE subscription for the whole screen ────────────────
+  late final Stream<List<ClassSchedule>> _schedulesStream;
+
+  // Latest snapshot held in state so filters, AppBar buttons and the table
+  // all read the SAME data without triggering extra Firebase reads.
+  List<ClassSchedule> _allSchedules = [];
 
   String? _selectedClassroomFilter;
-  List<String> _timeSlots = [];
-  List<String> _days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  String? _selectedTeacherFilter;
+  String? _selectedBatchFilter;
+
+  static const String _breakSlotMarker = 'BREAK|2:00 PM-2:30 PM';
+  late final List<String> _timeSlots;
+  static const List<String> _days = [
+    'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'
+  ];
 
   @override
   void initState() {
     super.initState();
     _timeSlots = _generateTimeSlots();
+    // Reuse the stream passed in from AppShell when available; otherwise create
+    // a new one. This prevents a duplicate Firebase subscription.
+    _schedulesStream = widget.schedulesStream ??
+        _scheduleService.getSchedules().asBroadcastStream();
   }
 
+  // ── Time-slot generation ──────────────────────────────────────────────────
+
   List<String> _generateTimeSlots() {
-    List<String> slots = [];
-    int startHour = 8;
-    int endHour = 20;
+    const int breakStart = 14 * 60;
+    const int breakEnd   = 14 * 60 + 30;
+    const int dayEnd     = 19 * 60;
+    final List<String> slots = [];
+    int cur = 11 * 60;
 
-    for (int hour = startHour; hour < endHour; hour++) {
-      for (int minute = 0; minute < 60; minute += 90) {
-        if (hour + (minute + 90) / 60 <= endHour) {
-          String startTime = _formatTime(hour, minute);
-          int endMinute = (minute + 90) % 60;
-          int endHourAdjusted = hour + (minute + 90) ~/ 60;
-          String endTime = _formatTime(endHourAdjusted, endMinute);
-          slots.add('$startTime-$endTime');
-        }
+    while (cur < dayEnd) {
+      final end = cur + 90;
+      if (cur <= breakStart && end > breakStart) {
+        if (cur < breakStart) slots.add('${_fmt(cur)}-${_fmt(breakStart)}');
+        slots.add(_breakSlotMarker);
+        cur = breakEnd;
+        continue;
       }
+      if (end <= dayEnd) {
+        slots.add('${_fmt(cur)}-${_fmt(end)}');
+        cur = end;
+      } else { break; }
     }
-
     return slots;
   }
 
-  String _formatTime(int hour, int minute) {
-    String period = hour >= 12 ? 'PM' : 'AM';
-    int displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
-    return '${displayHour.toString()}:${minute.toString().padLeft(2, '0')} $period';
+  String _fmt(int m) {
+    final h = m ~/ 60, min = m % 60;
+    final p = h >= 12 ? 'PM' : 'AM';
+    final dh = h > 12 ? h - 12 : (h == 0 ? 12 : h);
+    return '$dh:${min.toString().padLeft(2, '0')} $p';
   }
 
+  bool   _isBreak(String s) => s.startsWith('BREAK|');
+  String _breakLabel(String s) => s.replaceFirst('BREAK|', '');
+
+  // ── Filters ───────────────────────────────────────────────────────────────
+
+  bool get _hasActiveFilters =>
+      _selectedClassroomFilter != null ||
+          _selectedTeacherFilter   != null ||
+          _selectedBatchFilter     != null;
+
+  List<ClassSchedule> _applyFilters(List<ClassSchedule> src) {
+    var f = src;
+    if (_selectedClassroomFilter != null)
+      f = f.where((s) => s.classroom  == _selectedClassroomFilter).toList();
+    if (_selectedTeacherFilter != null)
+      f = f.where((s) => s.teacherName == _selectedTeacherFilter).toList();
+    if (_selectedBatchFilter != null)
+      f = f.where((s) => s.batchName   == _selectedBatchFilter).toList();
+    return f;
+  }
+
+  // Filter dialog reads from the cached _allSchedules — NO extra Firebase call
+  void _showFilterDialog() {
+    final classrooms = _allSchedules.map((s) => s.classroom)
+        .where((c) => c.isNotEmpty).toSet().toList()..sort();
+    final teachers = _allSchedules.map((s) => s.teacherName)
+        .where((t) => t.isNotEmpty).toSet().toList()..sort();
+    final batches = _allSchedules.map((s) => s.batchName)
+        .where((b) => b.isNotEmpty).toSet().toList()..sort();
+
+    showDialog(
+      context: context,
+      builder: (_) => FilterDialog(
+        classrooms: classrooms, teachers: teachers, batches: batches,
+        selectedClassroom: _selectedClassroomFilter,
+        selectedTeacher:   _selectedTeacherFilter,
+        selectedBatch:     _selectedBatchFilter,
+        onApply: (room, teacher, batch) => setState(() {
+          _selectedClassroomFilter = room;
+          _selectedTeacherFilter   = teacher;
+          _selectedBatchFilter     = batch;
+        }),
+        onClear: () => setState(() {
+          _selectedClassroomFilter = null;
+          _selectedTeacherFilter   = null;
+          _selectedBatchFilter     = null;
+        }),
+      ),
+    );
+  }
+
+  // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
+    final sw              = MediaQuery.of(context).size.width;
+    final showCompactMenu = sw < 796;
+    final isMobile        = sw < 768;
+
     return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.school, size: 28),
-            SizedBox(width: 12),
-            Text('Edify College of IT'),
-          ],
-        ),
-        actions: [
-          // Classroom Filter
-          StreamBuilder<List<ClassSchedule>>(
-            stream: _scheduleService.getSchedules(),
-            builder: (context, snapshot) {
-              final schedules = snapshot.data ?? [];
-              final classrooms = schedules
-                  .map((s) => s.classroom)
-                  .where((c) => c.isNotEmpty)
-                  .toSet()
-                  .toList()
-                ..sort();
+      backgroundColor: Colors.grey.shade200,
+      appBar: isMobile ? null : _buildAppBar(showCompactMenu),
+      // ONE StreamBuilder at the root; all children read from _allSchedules
+      body: StreamBuilder<List<ClassSchedule>>(
+        stream: _schedulesStream,
+        builder: (context, snap) {
+          if (snap.connectionState == ConnectionState.waiting && _allSchedules.isEmpty) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError) {
+            return Center(child: Text('Error: ${snap.error}',
+                style: const TextStyle(color: Colors.red)));
+          }
+          if (snap.hasData) _allSchedules = snap.data!;
 
-              return Container(
-                width: 200,
-                margin: EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-                child: DropdownButtonFormField<String>(
-                  decoration: InputDecoration(
-                    labelText: 'Filter by Classroom',
-                    prefixIcon: Icon(Icons.meeting_room, color: Colors.white),
-                    labelStyle: TextStyle(color: Colors.white),
-                    floatingLabelStyle: TextStyle(color: Colors.white),
-                    filled: true,
-                    fillColor: Colors.white.withOpacity(0.2),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: Colors.white),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: Colors.white),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: Colors.white, width: 2),
-                    ),
-                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
-                  dropdownColor: Theme.of(context).primaryColor,
-                  style: TextStyle(color: Colors.white),
-                  value: _selectedClassroomFilter,
-                  items: [
-                    DropdownMenuItem<String>(
-                      value: null,
-                      child: Text('All Classrooms', style: TextStyle(color: Colors.white)),
-                    ),
-                    ...classrooms.map((classroom) => DropdownMenuItem<String>(
-                      value: classroom,
-                      child: Text(classroom, style: TextStyle(color: Colors.white)),
-                    )),
-                  ],
-                  onChanged: (value) {
-                    setState(() {
-                      _selectedClassroomFilter = value;
-                    });
-                  },
-                ),
-              );
-            },
-          ),
-
-          // Add Teacher Button
-          Padding(
-            padding: EdgeInsets.symmetric(horizontal: 8),
-            child: ElevatedButton.icon(
-              onPressed: () => _showAddTeacherDialog(),
-              icon: Icon(Icons.person_add),
-              label: Text('Add Teacher'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: Theme.of(context).primaryColor,
-              ),
-            ),
-          ),
-
-          // Export to PDF Button
-          StreamBuilder<List<ClassSchedule>>(
-            stream: _scheduleService.getSchedules(),
-            builder: (context, snapshot) {
-              final hasSchedules = snapshot.hasData && snapshot.data!.isNotEmpty;
-              return Padding(
-                padding: EdgeInsets.only(right: 16),
-                child: ElevatedButton.icon(
-                  onPressed: hasSchedules
-                      ? () => _exportToPdf(snapshot.data!)
-                      : null,
-                  icon: Icon(Icons.picture_as_pdf),
-                  label: Text('Export PDF'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Theme.of(context).primaryColor,
-                  ),
-                ),
-              );
-            },
-          ),
-        ],
-      ),
-
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Colors.blue.shade50,
-              Colors.white,
-              Colors.purple.shade50,
-            ],
-          ),
-        ),
-        child: StreamBuilder<List<ClassSchedule>>(
-          stream: _scheduleService.getSchedules(),
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return Center(child: CircularProgressIndicator());
-            }
-
-            if (snapshot.hasError) {
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.error_outline, size: 64, color: Colors.red),
-                    SizedBox(height: 16),
-                    Text(
-                      'Error loading schedules',
-                      style: TextStyle(fontSize: 18, color: Colors.red),
-                    ),
-                    SizedBox(height: 8),
-                    Text(
-                      snapshot.error.toString(),
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                  ],
-                ),
-              );
-            }
-
-            final allSchedules = snapshot.data ?? [];
-            final filteredSchedules = _applyFilters(allSchedules);
-
-            return _buildStylishScheduleTable(filteredSchedules);
-          },
-        ),
-      ),
-
-      // Floating Action Button - Add New Class
-      floatingActionButton: StreamBuilder<List<Teacher>>(
-        stream: _teacherService.getTeachers(),
-        builder: (context, snapshot) {
-          final teachers = snapshot.data ?? [];
-
-          return FloatingActionButton.extended(
-            onPressed: teachers.isEmpty
-                ? () => _showNoTeachersDialog()
-                : () => _showAddClassDialog(teachers),
-            icon: Icon(Icons.add),
-            label: Text('Add New Class'),
-            elevation: 8,
-          );
+          final filtered = _applyFilters(_allSchedules);
+          return _buildTable(filtered);
         },
       ),
     );
   }
 
-  List<ClassSchedule> _applyFilters(List<ClassSchedule> schedules) {
-    if (_selectedClassroomFilter == null) {
-      return schedules;
-    }
-    return schedules.where((schedule) => schedule.classroom == _selectedClassroomFilter).toList();
-  }
+  // ── AppBar — reads _allSchedules, no extra stream ─────────────────────────
 
-  Widget _buildStylishScheduleTable(List<ClassSchedule> schedules) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: Offset(0, 2),
+  AppBar _buildAppBar(bool compact) => AppBar(
+    actions: [
+      // Filter badge button
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Stack(children: [
+          ElevatedButton.icon(
+            onPressed: _showFilterDialog,
+            icon: const Icon(Icons.filter_list),
+            label: const Text('Filters'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _hasActiveFilters
+                  ? Colors.white : Colors.white.withOpacity(0.9),
+              foregroundColor: Theme.of(context).primaryColor,
+            ),
           ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // Table Header Section
-          Container(
-            padding: EdgeInsets.symmetric(vertical: 16, horizontal: 24),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Colors.indigo.shade600, Colors.blue.shade500],
+          if (_hasActiveFilters)
+            Positioned(right: 0, top: 0,
+              child: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: const BoxDecoration(
+                    color: Colors.orange, shape: BoxShape.circle),
+                constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                child: Text(
+                  '${[_selectedClassroomFilter, _selectedTeacherFilter,
+                    _selectedBatchFilter].where((f) => f != null).length}',
+                  style: const TextStyle(color: Colors.white, fontSize: 10,
+                      fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
               ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
-                  blurRadius: 4,
-                  offset: Offset(0, 2),
-                ),
-              ],
             ),
-            child: Row(
-              children: [
-                Icon(Icons.calendar_month, color: Colors.white, size: 28),
-                SizedBox(width: 12),
-                Text(
-                  'Class Timetable',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                Spacer(),
-                if (_selectedClassroomFilter != null)
-                  Container(
-                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.meeting_room, color: Colors.white, size: 18),
-                        SizedBox(width: 8),
-                        Text(
-                          _selectedClassroomFilter!,
-                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w500),
-                        ),
-                        SizedBox(width: 8),
-                        InkWell(
-                          onTap: () {
-                            setState(() {
-                              _selectedClassroomFilter = null;
-                            });
-                          },
-                          child: Icon(Icons.close, color: Colors.white, size: 18),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
+        ]),
+      ),
+
+      if (!compact) ...[
+        _appBarBtn(Icons.person_add,  'Teacher',    _showAddTeacherDialog),
+        _appBarBtn(Icons.meeting_room,'Classroom',  _showAddClassroomDialog),
+        Padding(
+          padding: const EdgeInsets.only(right: 16),
+          child: ElevatedButton.icon(
+            onPressed: _allSchedules.isNotEmpty
+                ? () => _exportToPdf(_allSchedules) : null,
+            icon: const Icon(Icons.picture_as_pdf),
+            label: const Text('Export PDF'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.white,
+              foregroundColor: Theme.of(context).primaryColor,
             ),
           ),
+        ),
+      ],
 
-          // Scrollable Table
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.vertical,
-                child: Container(
-                  padding: EdgeInsets.all(16),
-                  child: Table(
-                    border: TableBorder(
-                      horizontalInside: BorderSide(color: Colors.grey.shade200, width: 1),
-                      verticalInside: BorderSide(color: Colors.grey.shade200, width: 1),
+      if (compact)
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.more_vert, color: Colors.white),
+          color: Colors.white,
+          onSelected: (v) {
+            if (v == 'add_teacher')    _showAddTeacherDialog();
+            if (v == 'add_classroom')  _showAddClassroomDialog();
+            if (v == 'export_pdf' && _allSchedules.isNotEmpty)
+              _exportToPdf(_allSchedules);
+          },
+          itemBuilder: (_) => [
+            _popItem('add_teacher',   Icons.person_add,    'Add Teacher',    true),
+            _popItem('add_classroom', Icons.meeting_room,  'Add Classroom',  true),
+            _popItem('export_pdf',    Icons.picture_as_pdf,'Export PDF',
+                _allSchedules.isNotEmpty),
+          ],
+        ),
+    ],
+  );
+
+  Widget _appBarBtn(IconData icon, String label, VoidCallback onTap) =>
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: ElevatedButton.icon(
+          onPressed: onTap,
+          icon: Icon(icon, size: 18),
+          label: Text(label),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.white,
+            foregroundColor: Theme.of(context).primaryColor,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          ),
+        ),
+      );
+
+  PopupMenuItem<String> _popItem(
+      String val, IconData icon, String label, bool enabled) =>
+      PopupMenuItem(
+        value: val, enabled: enabled,
+        child: Row(children: [
+          Icon(icon, color: enabled
+              ? Theme.of(context).primaryColor : Colors.grey),
+          const SizedBox(width: 12),
+          Text(label, style: TextStyle(
+              color: enabled ? Colors.black : Colors.grey)),
+        ]),
+      );
+
+  // ── Table ─────────────────────────────────────────────────────────────────
+
+  Widget _buildTable(List<ClassSchedule> schedules) {
+    return Container(
+      color: Colors.white,
+      child: ScrollConfiguration(
+        behavior: ScrollConfiguration.of(context).copyWith(
+          scrollbars: false,
+          dragDevices: {
+            PointerDeviceKind.touch,
+            PointerDeviceKind.mouse,
+            PointerDeviceKind.trackpad,
+          },
+        ),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.vertical,
+            physics: const AlwaysScrollableScrollPhysics(),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Table(
+                border: TableBorder(
+                  horizontalInside: BorderSide(color: Colors.grey.shade300),
+                  verticalInside:   BorderSide(color: Colors.grey.shade300),
+                ),
+                columnWidths: {
+                  0: const FixedColumnWidth(150),
+                  for (int i = 0; i < _timeSlots.length; i++)
+                    i + 1: _isBreak(_timeSlots[i])
+                        ? const FixedColumnWidth(80)
+                        : const FixedColumnWidth(150),
+                },
+                children: [
+                  // Header
+                  TableRow(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(colors: [
+                        Colors.blue.shade100, Colors.purple.shade100
+                      ]),
                     ),
-                    defaultColumnWidth: FixedColumnWidth(190),
-
                     children: [
-                      // Header Row with Days
-                      TableRow(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [Colors.blue.shade100, Colors.purple.shade100],
-                          ),
-                        ),
-                        children: [
-                          _buildModernHeaderCell('Time', isTime: true),
-                          ..._days.map((day) => _buildModernHeaderCell(day)),
-                        ],
-                      ),
-                      // Time Slot Rows
-                      ..._timeSlots.asMap().entries.map((entry) {
-                        int index = entry.key;
-                        String timeSlot = entry.value;
-                        bool isEvenRow = index % 2 == 0;
-
-                        return TableRow(
-                          decoration: BoxDecoration(
-                            color: isEvenRow ? Colors.grey.shade50 : Colors.white,
-                          ),
-                          children: [
-                            _buildModernTimeCell(timeSlot),
-                            ..._days.map((day) => _buildModernScheduleCell(schedules, timeSlot, day)),
-                          ],
-                        );
-                      }),
+                      _headerCell('Day', isDay: true),
+                      ..._timeSlots.map((s) => _isBreak(s)
+                          ? _breakHeaderCell(s) : _headerCell(s, isTimeSlot: true)),
                     ],
                   ),
-                ),
+                  // Day rows
+                  ..._days.asMap().entries.map((e) {
+                    final isEven = e.key % 2 == 0;
+                    return TableRow(
+                      decoration: BoxDecoration(
+                          color: isEven ? Colors.grey.shade50 : Colors.white),
+                      children: [
+                        _dayCell(e.value),
+                        ..._timeSlots.map((s) => _isBreak(s)
+                            ? _breakBodyCell()
+                            : _scheduleCell(schedules, s, e.value)),
+                      ],
+                    );
+                  }),
+                ],
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildModernHeaderCell(String text, {bool isTime = false}) {
-    return Container(
-      padding: EdgeInsets.symmetric(vertical: 16, horizontal: 12),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          if (!isTime)
-            Icon(
-              Icons.calendar_today,
-              size: 16,
-              color: Colors.indigo.shade700,
-            ),
-          if (!isTime) SizedBox(width: 6),
-          Text(
-            text,
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 15,
-              color: isTime ? Colors.purple.shade700 : Colors.indigo.shade700,
-              letterSpacing: 0.5,
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildModernTimeCell(String timeSlot) {
-    return Container(
-      padding: EdgeInsets.symmetric(vertical: 16, horizontal: 12),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Colors.indigo.shade50, Colors.purple.shade50],
         ),
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.access_time, size: 16, color: Colors.indigo.shade600),
-          SizedBox(width: 8),
-          Text(
-            timeSlot,
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              fontSize: 13,
-              color: Colors.indigo.shade800,
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
     );
   }
 
-  Widget _buildModernScheduleCell(List<ClassSchedule> schedules, String timeSlot, String day) {
-    final classesAtSlot = schedules.where((s) =>
-    s.timeSlot == timeSlot && s.days.contains(day)
-    ).toList();
+  Widget _headerCell(String text,
+      {bool isDay = false, bool isTimeSlot = false}) =>
+      Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          if (isTimeSlot) ...[
+            Icon(Icons.access_time, size: 14, color: Colors.purple.shade700),
+            const SizedBox(width: 4),
+          ],
+          Expanded(
+            child: Text(text,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize:   isTimeSlot ? 10 : 13,
+                color: isDay ? Colors.purple.shade700 : Colors.indigo.shade700,
+                letterSpacing: 0.4,
+              ),
+              textAlign: TextAlign.center, maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ]),
+      );
+
+  Widget _breakHeaderCell(String slot) => Container(
+    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+          colors: [Colors.amber.shade200, Colors.orange.shade200]),
+    ),
+    child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Icon(Icons.free_breakfast, size: 16, color: Colors.orange.shade800),
+      const SizedBox(height: 4),
+      Text('BREAK', style: TextStyle(fontWeight: FontWeight.bold,
+          fontSize: 10, color: Colors.orange.shade900, letterSpacing: 0.5),
+          textAlign: TextAlign.center),
+      Text(_breakLabel(slot),
+          style: TextStyle(fontSize: 8, color: Colors.orange.shade800),
+          textAlign: TextAlign.center),
+    ]),
+  );
+
+  Widget _dayCell(String day) => Container(
+    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+    decoration: BoxDecoration(gradient: LinearGradient(
+        colors: [Colors.indigo.shade50, Colors.purple.shade50])),
+    child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Icon(Icons.calendar_today, size: 14, color: Colors.indigo.shade600),
+      const SizedBox(width: 6),
+      Expanded(child: Text(day,
+          style: TextStyle(fontWeight: FontWeight.w600,
+              fontSize: 12, color: Colors.indigo.shade800),
+          textAlign: TextAlign.center)),
+    ]),
+  );
+
+  Widget _breakBodyCell() => Container(
+    constraints: const BoxConstraints(minHeight: 70),
+    color: Colors.amber.shade50,
+    child: CustomPaint(
+      painter: _StripePainter(color: Colors.amber.shade100, gap: 8),
+      child: Center(child: Icon(Icons.coffee,
+          size: 22, color: Colors.orange.shade300)),
+    ),
+  );
+
+  Widget _scheduleCell(
+      List<ClassSchedule> schedules, String slot, String day) {
+    final classes = schedules
+        .where((s) => s.timeSlot == slot && s.days.contains(day))
+        .toList();
 
     return Container(
-      padding: EdgeInsets.all(12),
-      constraints: BoxConstraints(minHeight: 100),
-      child: classesAtSlot.isEmpty
-          ? Center(
-        child: Icon(
-          Icons.remove_circle_outline,
-          color: Colors.grey.shade300,
-          size: 24,
-        ),
-      )
+      padding: const EdgeInsets.all(8),
+      constraints: const BoxConstraints(minHeight: 70),
+      child: classes.isEmpty
+          ? Center(child: Icon(Icons.remove_circle_outline,
+          color: Colors.grey.shade300, size: 20))
           : Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
-        children: classesAtSlot.asMap().entries.map((entry) {
-          int index = entry.key;
-          ClassSchedule schedule = entry.value;
-
-          // Gradient colors for each class
-          List<List<Color>> gradients = [
-            [Colors.blue.shade400, Colors.blue.shade600],
-            [Colors.purple.shade400, Colors.purple.shade600],
-            [Colors.teal.shade400, Colors.teal.shade600],
-            [Colors.orange.shade400, Colors.orange.shade600],
+        children: classes.asMap().entries.map((e) {
+          const gradients = [
+            [Color(0xFF42A5F5), Color(0xFF1E88E5)],
+            [Color(0xFFAB47BC), Color(0xFF8E24AA)],
+            [Color(0xFF26A69A), Color(0xFF00897B)],
+            [Color(0xFFFFA726), Color(0xFFFB8C00)],
           ];
-
-          List<Color> gradient = gradients[index % gradients.length];
-
+          final g = gradients[e.key % gradients.length];
+          final s = e.value;
           return Container(
-            margin: EdgeInsets.only(bottom: classesAtSlot.length > 1 ? 8 : 0),
-            padding: EdgeInsets.all(12),
+            margin: EdgeInsets.only(
+                bottom: classes.length > 1 ? 5 : 0),
+            padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
               gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: gradient,
-              ),
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [
-                BoxShadow(
-                  color: gradient[0].withOpacity(0.3),
-                  blurRadius: 8,
-                  offset: Offset(0, 4),
-                ),
-              ],
+                  begin: Alignment.topLeft, end: Alignment.bottomRight,
+                  colors: g),
+              borderRadius: BorderRadius.circular(7),
+              boxShadow: [BoxShadow(color: g[0].withOpacity(0.2),
+                  blurRadius: 4, offset: const Offset(0, 2))],
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Batch Name
-                Row(
-                  children: [
-                    Container(
-                      padding: EdgeInsets.all(4),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.3),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Icon(Icons.class_, size: 14, color: Colors.white),
-                    ),
-                    SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        schedule.batchName,
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
-                          color: Colors.white,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                SizedBox(height: 8),
-
-                // Teacher Name
-                Row(
-                  children: [
-                    Icon(Icons.person, size: 12, color: Colors.white.withOpacity(0.9)),
-                    SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        schedule.teacherName,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.white.withOpacity(0.95),
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                SizedBox(height: 4),
-
-                // Classroom
-                Row(
-                  children: [
-                    Icon(Icons.meeting_room, size: 12, color: Colors.white.withOpacity(0.9)),
-                    SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        schedule.classroom,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.white.withOpacity(0.95),
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-                SizedBox(height: 8),
-
-                // Delete Button
+                _cardRow(Icons.class_,       s.batchName,   bold: true),
+                const SizedBox(height: 4),
+                _cardRow(Icons.person,        s.teacherName),
+                const SizedBox(height: 3),
+                _cardRow(Icons.meeting_room,  s.classroom),
+                const SizedBox(height: 4),
                 Align(
                   alignment: Alignment.centerRight,
                   child: InkWell(
-                    onTap: () => _deleteSchedule(schedule),
+                    onTap: () => _deleteSchedule(s),
                     child: Container(
-                      padding: EdgeInsets.all(4),
+                      padding: const EdgeInsets.all(3),
                       decoration: BoxDecoration(
                         color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(4),
+                        borderRadius: BorderRadius.circular(3.5),
                       ),
-                      child: Icon(
-                        Icons.delete_outline,
-                        size: 16,
-                        color: Colors.white,
-                      ),
+                      child: const Icon(Icons.delete_outline,
+                          size: 14, color: Colors.white),
                     ),
                   ),
                 ),
@@ -570,47 +473,48 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _showAddTeacherDialog() async {
-    final result = await showDialog(
-      context: context,
-      builder: (context) => AddTeacherDialog(),
-    );
-  }
+  Widget _cardRow(IconData icon, String text, {bool bold = false}) => Row(
+    children: [
+      Icon(icon, size: bold ? 12 : 10,
+          color: Colors.white.withOpacity(bold ? 1.0 : 0.9)),
+      const SizedBox(width: 3),
+      Expanded(child: Text(text,
+          style: TextStyle(fontSize: bold ? 11 : 9,
+              fontWeight: bold ? FontWeight.bold : FontWeight.normal,
+              color: Colors.white.withOpacity(bold ? 1.0 : 0.95)),
+          overflow: TextOverflow.ellipsis, maxLines: 1)),
+    ],
+  );
 
-  void _showAddClassDialog(List<Teacher> teachers) async {
-    final result = await showDialog(
-      context: context,
-      builder: (context) => AddClassDialog(teachers: teachers),
-    );
-  }
+  // ── Actions ───────────────────────────────────────────────────────────────
 
-  void _showNoTeachersDialog() {
+  void _showAddTeacherDialog() =>
+      showDialog(context: context, builder: (_) => const AddTeacherDialog());
+
+  void _showAddClassroomDialog() =>
+      showDialog(context: context, builder: (_) => const AddClassroomDialog());
+
+  Future<void> _showAddClassDialog() async {
+    final teachers = await _teacherService.getTeachers().first;
+    if (!mounted) return;
+    if (teachers.isEmpty) {
+      showDialog(context: context, builder: (_) => AlertDialog(
+        title: const Row(children: [
+          Icon(Icons.warning, color: Colors.orange),
+          SizedBox(width: 12), Text('No Teachers'),
+        ]),
+        content: const Text('Add at least one teacher before scheduling a class.'),
+        actions: [TextButton(onPressed: () => Navigator.pop(context),
+            child: const Text('OK'))],
+      ));
+      return;
+    }
+    if (!mounted) return;
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.warning, color: Colors.orange),
-            SizedBox(width: 12),
-            Text('No Teachers Available'),
-          ],
-        ),
-        content: Text(
-          'Please add at least one teacher before creating a class schedule.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.of(context).pop();
-              _showAddTeacherDialog();
-            },
-            child: Text('Add Teacher'),
-          ),
-        ],
+      builder: (_) => AddClassDialog(
+        teachers:          teachers,
+        existingSchedules: _allSchedules,
       ),
     );
   }
@@ -618,66 +522,203 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _exportToPdf(List<ClassSchedule> schedules) async {
     try {
       await _pdfService.generateSchedulePdf(schedules);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('PDF generated successfully'),
-          backgroundColor: Colors.green,
-        ),
-      );
+          backgroundColor: Colors.green));
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Error generating PDF: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+          backgroundColor: Colors.red));
     }
   }
 
   Future<void> _deleteSchedule(ClassSchedule schedule) async {
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (_) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            Icon(Icons.warning, color: Colors.orange),
-            SizedBox(width: 12),
-            Text('Delete Class'),
-          ],
-        ),
-        content: Text('Are you sure you want to delete "${schedule.batchName}"?'),
+        title: Row(children: [
+          const Icon(Icons.warning, color: Colors.orange),
+          const SizedBox(width: 12),
+          const Text('Delete Class'),
+        ]),
+        content: Text('Delete "${schedule.batchName}"?'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: Text('Cancel'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: Text('Delete'),
+            child: const Text('Delete'),
           ),
         ],
       ),
     );
-
-    if (confirm == true) {
-      try {
-        await _scheduleService.deleteSchedule(schedule.id);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Class deleted successfully'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error deleting class: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+    if (confirm != true) return;
+    try {
+      await _scheduleService.deleteSchedule(schedule.id);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Class deleted'), backgroundColor: Colors.green));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Error: $e'), backgroundColor: Colors.red));
     }
+  }
+}
+
+// ── Stripe painter ────────────────────────────────────────────────────────────
+
+class _StripePainter extends CustomPainter {
+  final Color color;
+  final double gap;
+  const _StripePainter({required this.color, required this.gap});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+    for (double d = 0; d < size.width + size.height; d += gap) {
+      canvas.drawLine(
+        Offset(d < size.height ? 0 : d - size.height,
+            d < size.height ? d : size.height),
+        Offset(d < size.width  ? d : size.width,
+            d < size.width  ? 0 : d - size.width),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_StripePainter old) =>
+      old.color != color || old.gap != gap;
+}
+
+// ── Filter Dialog ─────────────────────────────────────────────────────────────
+
+class FilterDialog extends StatefulWidget {
+  final List<String> classrooms, teachers, batches;
+  final String? selectedClassroom, selectedTeacher, selectedBatch;
+  final Function(String?, String?, String?) onApply;
+  final VoidCallback onClear;
+
+  const FilterDialog({
+    Key? key,
+    required this.classrooms, required this.teachers, required this.batches,
+    this.selectedClassroom, this.selectedTeacher, this.selectedBatch,
+    required this.onApply, required this.onClear,
+  }) : super(key: key);
+
+  @override
+  State<FilterDialog> createState() => _FilterDialogState();
+}
+
+class _FilterDialogState extends State<FilterDialog> {
+  String? _room, _teacher, _batch;
+
+  @override
+  void initState() {
+    super.initState();
+    _room    = widget.selectedClassroom;
+    _teacher = widget.selectedTeacher;
+    _batch   = widget.selectedBatch;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      child: Container(
+        width: 500, padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // Header
+              Row(children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                        colors: [Colors.blue.shade400, Colors.purple.shade400]),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(Icons.filter_list, color: Colors.white, size: 28),
+                ),
+                const SizedBox(width: 16),
+                Expanded(child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Filter Schedule', style: TextStyle(fontSize: 24,
+                      fontWeight: FontWeight.bold, color: Colors.grey.shade800)),
+                  Text('Refine your schedule view',
+                      style: TextStyle(fontSize: 14, color: Colors.grey.shade600)),
+                ])),
+                IconButton(onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.close), color: Colors.grey.shade600),
+              ]),
+              const SizedBox(height: 24), const Divider(), const SizedBox(height: 24),
+
+              _dropdown('Filter by Teacher',   Icons.person,       Colors.blue,
+                  widget.teachers,   _teacher, (v) => setState(() => _teacher = v)),
+              const SizedBox(height: 16),
+              _dropdown('Filter by Classroom', Icons.meeting_room,  Colors.green,
+                  widget.classrooms, _room,    (v) => setState(() => _room = v)),
+              const SizedBox(height: 16),
+              _dropdown('Filter by Batch',     Icons.group,         Colors.orange,
+                  widget.batches,    _batch,   (v) => setState(() => _batch = v)),
+              const SizedBox(height: 24),
+
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                TextButton.icon(
+                  onPressed: () {
+                    setState(() { _room = null; _teacher = null; _batch = null; });
+                    widget.onClear();
+                    Navigator.pop(context);
+                  },
+                  icon: const Icon(Icons.clear_all), label: const Text('Clear All'),
+                  style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
+                ),
+                Row(children: [
+                  TextButton(onPressed: () => Navigator.pop(context),
+                      child: const Text('Cancel')),
+                  const SizedBox(width: 12),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      widget.onApply(_room, _teacher, _batch);
+                      Navigator.pop(context);
+                    },
+                    icon: const Icon(Icons.check), label: const Text('Apply'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue.shade600,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ]),
+              ]),
+            ]),
+      ),
+    );
+  }
+
+  Widget _dropdown(String label, IconData icon, MaterialColor color,
+      List<String> items, String? value, ValueChanged<String?> onChanged) {
+    return DropdownButtonFormField<String>(
+      decoration: InputDecoration(
+        labelText:  label,
+        prefixIcon: Icon(icon, color: color.shade600),
+        border:        OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: color.shade600, width: 2)),
+        filled: true, fillColor: Colors.grey.shade50,
+      ),
+      value: value,
+      items: [
+        DropdownMenuItem<String>(value: null,
+            child: Text('All ${label.split(' ').last}s')),
+        ...items.map((i) => DropdownMenuItem<String>(value: i, child: Text(i))),
+      ],
+      onChanged: onChanged,
+    );
   }
 }

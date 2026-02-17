@@ -1,3 +1,4 @@
+import 'package:edify/widgets/App_shell.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'firebase_options.dart';
@@ -24,7 +25,7 @@ class MyApp extends StatelessWidget {
       title: 'Edify Group of Colleges',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.theme,
-      home: const HomeScreen(),
+      home: const AppShell(),
     );
   }
 }
