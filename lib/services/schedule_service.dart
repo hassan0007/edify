@@ -1,21 +1,22 @@
+// services/schedule_service.dart
+
 import 'package:firebase_database/firebase_database.dart';
 import '../models/class_schedule.dart';
+import '../models/category.dart';
 
 class ScheduleService {
-  final DatabaseReference _database = FirebaseDatabase.instance.ref();
-  final String _collection = 'schedules';
+  final DatabaseReference _database    = FirebaseDatabase.instance.ref();
+  final String            _collection  = 'schedules';
 
-  // ── Break / day boundary constants ────────────────────────────────────────
-  // Keep these in sync with home_screen.dart and add_class_dialog.dart.
-  static const int _dayStartMinutes   = 11 * 60;      // 11:00 AM
-  static const int _breakStartMinutes = 14 * 60;      // 2:00 PM
-  static const int _breakEndMinutes   = 14 * 60 + 30; // 2:30 PM
-  static const int _dayEndMinutes     = 19 * 60;      // 7:00 PM
-  static const int _slotDuration      = 90;           // minutes per class
+  // ── Legacy global constants (fallback when no category is used) ───────────
+  static const int _dayStartMinutes   = 11 * 60;       // 11:00 AM
+  static const int _breakStartMinutes = 14 * 60;       // 2:00 PM
+  static const int _breakEndMinutes   = 14 * 60 + 30;  // 2:30 PM
+  static const int _dayEndMinutes     = 19 * 60;       // 7:00 PM
+  static const int _slotDuration      = 90;            // minutes
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  /// Add a new class schedule.
   Future<String> addSchedule(ClassSchedule schedule) async {
     try {
       final newRef = _database.child(_collection).push();
@@ -26,60 +27,64 @@ class ScheduleService {
     }
   }
 
-  /// Stream of all schedules, sorted by time slot.
   Stream<List<ClassSchedule>> getSchedules() {
     return _database.child(_collection).onValue.map((event) {
-      final data = event.snapshot.value as Map<dynamic, dynamic>?;
-      if (data == null) return [];
-
-      final schedules = data.entries.map((entry) {
-        final scheduleData = Map<String, dynamic>.from(entry.value as Map);
-        return ClassSchedule.fromMap(scheduleData, entry.key as String);
-      }).toList();
-
-      schedules.sort((a, b) => a.timeSlot.compareTo(b.timeSlot));
-      return schedules;
+      return _parseAndSort(event.snapshot.value);
     });
   }
 
-  /// Stream of schedules filtered by teacher ID.
+  Stream<List<ClassSchedule>> getSchedulesByType(ClassType type) {
+    return getSchedules()
+        .map((all) => all.where((s) => s.classType == type).toList());
+  }
+
+  Stream<List<ClassSchedule>> getSchedulesByCategory(String categoryId) {
+    return getSchedules()
+        .map((all) => all.where((s) => s.categoryId == categoryId).toList());
+  }
+
   Stream<List<ClassSchedule>> getSchedulesByTeacher(String teacherId) {
     return _database
         .child(_collection)
         .orderByChild('teacherId')
         .equalTo(teacherId)
         .onValue
-        .map((event) {
-      final data = event.snapshot.value as Map<dynamic, dynamic>?;
-      if (data == null) return [];
+        .map((event) => _parseAndSort(event.snapshot.value));
+  }
 
-      final schedules = data.entries.map((entry) {
-        final scheduleData = Map<String, dynamic>.from(entry.value as Map);
-        return ClassSchedule.fromMap(scheduleData, entry.key as String);
-      }).toList();
-
-      schedules.sort((a, b) => a.timeSlot.compareTo(b.timeSlot));
-      return schedules;
-    });
+  Stream<List<ClassSchedule>> getSchedulesByTeacherAndType(
+      String teacherId,
+      ClassType type,
+      ) {
+    return getSchedulesByTeacher(teacherId)
+        .map((all) => all.where((s) => s.classType == type).toList());
   }
 
   // ── Availability ──────────────────────────────────────────────────────────
 
-  /// Returns `true` when [timeSlot] is free for the given [teacherId] AND
-  /// [classroom] on the given [days], and does not overlap the break.
+  /// Returns true when [timeSlot] is free for the given [teacherId] AND
+  /// [classroom] on the given [days].
   ///
-  /// A slot is blocked when:
-  ///   • the same teacher is already in it on any overlapping day, OR
-  ///   • the same classroom is already occupied in it on any overlapping day.
-  ///
-  /// Two different teachers in two different classrooms CAN share a slot.
+  /// Pass [category] to validate against that category's break window.
+  /// When null, the global 2:00-2:30 PM break is used as a fallback.
   Future<bool> isTimeSlotAvailable(
-      String       timeSlot,
-      List<String> days,
-      String       teacherId,
-      String       classroom,
-      ) async {
-    if (_slotOverlapsBreak(timeSlot)) return false;
+      String            timeSlot,
+      List<String>      days,
+      String            teacherId,
+      String            classroom, {
+        ScheduleCategory? category,
+      }) async {
+    // Break validation
+    if (category != null) {
+      if (_slotOverlapsBreakWindow(
+        timeSlot,
+        breakStart: category.breakStartTotal,
+        breakEnd:   category.breakEndTotal,
+        hasBreak:   category.hasBreak,
+      )) return false;
+    } else {
+      if (_slotOverlapsBreak(timeSlot)) return false;
+    }
 
     try {
       final event = await _database
@@ -98,119 +103,41 @@ class ScheduleService {
         final daysOverlap = existing.days.any((d) => days.contains(d));
         if (!daysOverlap) continue;
 
-        // Block if same teacher on overlapping days
         if (existing.teacherId == teacherId) return false;
-
-        // Block if same classroom on overlapping days
         if (existing.classroom == classroom) return false;
       }
-
       return true;
     } catch (e) {
       throw Exception('Error checking availability: $e');
     }
   }
 
-  /// Returns all valid slots (11 AM–7 PM, break excluded) that are free for
-  /// [teacherId] and [classroom] on the days implied by [pattern].
+  /// Returns all valid slots free for [teacherId] and [classroom] on the
+  /// days implied by [pattern].
+  ///
+  /// When [category] is provided, its slots drive everything (start/end/
+  /// duration/break). Otherwise falls back to the global hardcoded schedule.
   Future<List<String>> getAvailableTimeSlots(
-      SchedulePattern pattern,
-      String          teacherId,
-      String          classroom,
-      ) async {
-    final allSlots = _generateTimeSlots();
-    final days     = ClassSchedule.getDaysForPattern(pattern);
+      SchedulePattern   pattern,
+      String            teacherId,
+      String            classroom, {
+        ScheduleCategory? category,
+      }) async {
+    final allSlots = category != null
+        ? category.timeSlots
+        : _generateGlobalTimeSlots();
+
+    final days = ClassSchedule.getDaysForPattern(pattern);
 
     final List<String> available = [];
     for (final slot in allSlots) {
-      if (await isTimeSlotAvailable(slot, days, teacherId, classroom)) {
-        available.add(slot);
-      }
+      final free = await isTimeSlotAvailable(
+        slot, days, teacherId, classroom,
+        category: category,
+      );
+      if (free) available.add(slot);
     }
     return available;
-  }
-
-  // ── Time-slot generation ──────────────────────────────────────────────────
-
-  /// Generates 90-minute slots from 11:00 AM to 7:00 PM,
-  /// skipping any slot that would overlap the 2:00–2:30 PM break.
-  ///
-  /// Resulting slots:
-  ///   11:00 AM – 12:30 PM
-  ///   12:30 PM –  2:00 PM
-  ///    2:30 PM –  4:00 PM
-  ///    4:00 PM –  5:30 PM
-  ///    5:30 PM –  7:00 PM
-  List<String> _generateTimeSlots() {
-    final List<String> slots = [];
-    int current = _dayStartMinutes;
-
-    while (current < _dayEndMinutes) {
-      final end = current + _slotDuration;
-
-      // Advance past the break if we've landed inside it.
-      if (current >= _breakStartMinutes && current < _breakEndMinutes) {
-        current = _breakEndMinutes;
-        continue;
-      }
-
-      // If this slot would run into the break, skip to after the break.
-      if (current < _breakStartMinutes && end > _breakStartMinutes) {
-        current = _breakEndMinutes;
-        continue;
-      }
-
-      if (end <= _dayEndMinutes) {
-        slots.add('${_minutesToTime(current)}-${_minutesToTime(end)}');
-        current = end;
-      } else {
-        break;
-      }
-    }
-
-    return slots;
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  /// Returns `true` if [timeSlot] (formatted as "H:MM AM-H:MM PM") starts
-  /// inside the 2:00–2:30 PM break window.
-  bool _slotOverlapsBreak(String timeSlot) {
-    try {
-      final start = timeSlot.split('-').first.trim();
-      final startMinutes = _timeStringToMinutes(start);
-      return startMinutes >= _breakStartMinutes &&
-          startMinutes < _breakEndMinutes;
-    } catch (_) {
-      return false; // Malformed slot string — don't block it here.
-    }
-  }
-
-  /// Converts a time string like "2:00 PM" to total minutes from midnight.
-  int _timeStringToMinutes(String time) {
-    final parts   = time.trim().split(' ');        // ["2:00", "PM"]
-    final hm      = parts[0].split(':');           // ["2", "00"]
-    final isPM    = parts[1].toUpperCase() == 'PM';
-    int hour      = int.parse(hm[0]);
-    final minute  = int.parse(hm[1]);
-
-    if (isPM && hour != 12) hour += 12;
-    if (!isPM && hour == 12) hour = 0;
-
-    return hour * 60 + minute;
-  }
-
-  /// Converts total minutes from midnight to a display string like "2:30 PM".
-  String _minutesToTime(int totalMinutes) {
-    final hour   = totalMinutes ~/ 60;
-    final minute = totalMinutes % 60;
-    return _formatTime(hour, minute);
-  }
-
-  String _formatTime(int hour, int minute) {
-    final period      = hour >= 12 ? 'PM' : 'AM';
-    final displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
-    return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
   }
 
   // ── Delete ────────────────────────────────────────────────────────────────
@@ -221,5 +148,100 @@ class ScheduleService {
     } catch (e) {
       throw Exception('Error deleting schedule: $e');
     }
+  }
+
+  // ── Time-slot generation ──────────────────────────────────────────────────
+
+  /// Global fallback: 11 AM to 7 PM, 90-min slots, 2:00-2:30 PM break.
+  List<String> _generateGlobalTimeSlots() {
+    final List<String> slots = [];
+    int cur = _dayStartMinutes;
+
+    while (cur < _dayEndMinutes) {
+      final end = cur + _slotDuration;
+
+      if (cur >= _breakStartMinutes && cur < _breakEndMinutes) {
+        cur = _breakEndMinutes;
+        continue;
+      }
+      if (cur < _breakStartMinutes && end > _breakStartMinutes) {
+        cur = _breakEndMinutes;
+        continue;
+      }
+      if (end <= _dayEndMinutes) {
+        slots.add('${_minutesToTime(cur)}-${_minutesToTime(end)}');
+        cur = end;
+      } else {
+        break;
+      }
+    }
+    return slots;
+  }
+
+  // ── Private helpers ───────────────────────────────────────────────────────
+
+  List<ClassSchedule> _parseAndSort(Object? raw) {
+    final data = raw as Map<dynamic, dynamic>?;
+    if (data == null) return [];
+
+    final schedules = data.entries.map((entry) {
+      final sd = Map<String, dynamic>.from(entry.value as Map);
+      return ClassSchedule.fromMap(sd, entry.key as String);
+    }).toList();
+
+    schedules.sort((a, b) => a.timeSlot.compareTo(b.timeSlot));
+    return schedules;
+  }
+
+  /// Legacy global break check (2:00-2:30 PM).
+  bool _slotOverlapsBreak(String timeSlot) {
+    try {
+      final startMinutes = _timeStringToMinutes(
+          timeSlot.split('-').first.trim());
+      return startMinutes >= _breakStartMinutes &&
+          startMinutes < _breakEndMinutes;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Category-aware break check using the category's own break window.
+  bool _slotOverlapsBreakWindow(
+      String timeSlot, {
+        required int  breakStart,
+        required int  breakEnd,
+        required bool hasBreak,
+      }) {
+    if (!hasBreak) return false;
+    try {
+      final parts     = timeSlot.split('-');
+      final slotStart = _timeStringToMinutes(parts.first.trim());
+      final slotEnd   = _timeStringToMinutes(parts.last.trim());
+      // True if slot and break windows overlap at all
+      return slotStart < breakEnd && slotEnd > breakStart;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  int _timeStringToMinutes(String time) {
+    final parts  = time.trim().split(' ');
+    final hm     = parts[0].split(':');
+    final isPM   = parts[1].toUpperCase() == 'PM';
+    int    hour  = int.parse(hm[0]);
+    final minute = int.parse(hm[1]);
+
+    if (isPM  && hour != 12) hour += 12;
+    if (!isPM && hour == 12) hour  = 0;
+
+    return hour * 60 + minute;
+  }
+
+  String _minutesToTime(int totalMinutes) {
+    final hour        = totalMinutes ~/ 60;
+    final minute      = totalMinutes % 60;
+    final period      = hour >= 12 ? 'PM' : 'AM';
+    final displayHour = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
+    return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
   }
 }

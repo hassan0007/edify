@@ -1,8 +1,10 @@
+// models/teacher.dart
+
 class Teacher {
-  final String id;
-  final String name;
-  final String email;
-  final String phone;
+  final String   id;
+  final String   name;
+  final String   email;
+  final String   phone;
   final DateTime createdAt;
 
   Teacher({
@@ -13,41 +15,35 @@ class Teacher {
     required this.createdAt,
   });
 
-  // Convert to Map for Firebase
-  Map<String, dynamic> toMap() {
-    return {
-      'id': id,
-      'name': name,
-      'email': email,
-      'phone': phone,
-      'createdAt': createdAt.toIso8601String(),
-    };
-  }
+  Map<String, dynamic> toMap() => {
+    // Do NOT store 'id' — the RTDB push key is the id.
+    'name':      name,
+    'email':     email,
+    'phone':     phone,
+    'createdAt': createdAt.toIso8601String(),
+  };
 
-  // Create from Firebase document
-  factory Teacher.fromMap(Map<String, dynamic> map, String documentId) {
-    return Teacher(
-      id: documentId,
-      name: map['name'] ?? '',
-      email: map['email'] ?? '',
-      phone: map['phone'] ?? '',
-      createdAt: DateTime.parse(map['createdAt']),
-    );
-  }
+  factory Teacher.fromMap(Map<String, dynamic> map, String documentId) =>
+      Teacher(
+        id:        documentId,
+        name:      map['name']      as String? ?? '',
+        email:     map['email']     as String? ?? '',
+        phone:     map['phone']     as String? ?? '',
+        createdAt: DateTime.parse(map['createdAt'] as String),
+      );
 
   Teacher copyWith({
-    String? id,
-    String? name,
-    String? email,
-    String? phone,
+    String?   id,
+    String?   name,
+    String?   email,
+    String?   phone,
     DateTime? createdAt,
-  }) {
-    return Teacher(
-      id: id ?? this.id,
-      name: name ?? this.name,
-      email: email ?? this.email,
-      phone: phone ?? this.phone,
-      createdAt: createdAt ?? this.createdAt,
-    );
-  }
+  }) =>
+      Teacher(
+        id:        id        ?? this.id,
+        name:      name      ?? this.name,
+        email:     email     ?? this.email,
+        phone:     phone     ?? this.phone,
+        createdAt: createdAt ?? this.createdAt,
+      );
 }

@@ -22,7 +22,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Edify Group of Colleges',
+      title: 'Hussain Group of Colleges',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.theme,
       home: const AppShell(),
